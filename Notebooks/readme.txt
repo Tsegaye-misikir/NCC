@@ -17,7 +17,7 @@ I would provide the files here but they are incovienently large.
 Therefore, use the first Notebook to create the dataset. Then save it by
 following the instructions above. 
 The directories used for 2,3, 4 is 
-"/content/gdrive/My Drive/Thesis/EU-BookShop Files/"
+"/content/gdrive/My Drive/NCC/EU-BookShop Files/"
 or respectively 
-"/content/gdrive/My Drive/Thesis/JRC_Arquis_files/"
+"/content/gdrive/My Drive/NCC/JRC_Arquis_files/"
 if another directory is used, change the variable "main_dir" accordingly in the other notebooks.
