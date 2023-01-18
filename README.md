@@ -5,7 +5,7 @@
 
 ----
 
-This work proposes several new methods to derive inter-lingual document represen-tations (Marc-lenz and Tsegaye Misikir). 
+This work proposes several new methods to derive inter-lingual document represen-tations (Marc-lenz ,Tsegaye Misikir and Tomas Horvath). 
 these methods aim to enhance the quality content-based Multilingual Document Recommendation Systems. 
 The main idea centers around creating inter-lingualrepresentations by using mappings to align monolingual representation spaces.
 
