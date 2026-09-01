@@ -1,0 +1,20 @@
+# Dependencies for the layer-wise emotion probing study (layerprobe/).
+#
+# Install a torch build that matches your CUDA version -- see
+# https://pytorch.org/get-started/locally/ -- before installing the rest.
+# The other packages in this repository (the interlingual document
+# representation work) have their own, older dependencies.
+
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+pandas>=2.0
+pyyaml>=6.0
+matplotlib>=3.7
+
+torch>=2.0
+transformers>=4.35
+sentencepiece>=0.1.99      # XLM-R's tokenizer
+datasets>=2.14             # only needed for data.source == "hf"
+
+pytest>=7.4                # tests

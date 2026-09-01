@@ -1,0 +1,46 @@
+# Running the same study on your own files instead of a Hugging Face dataset.
+#
+# Expected layout under data.local_dir, one file per language and split:
+#
+#   data/emotion/amh_train.csv
+#   data/emotion/amh_dev.csv      (optional -- carved out of train if absent)
+#   data/emotion/amh_test.csv     (optional -- likewise)
+#
+# Multi-label files need a text column plus one 0/1 column per emotion:
+#
+#   text,anger,disgust,fear,joy,sadness,surprise
+#   "...",1,0,0,0,1,0
+#
+# Single-label files need a text column and a `label` column holding the
+# emotion name (set data.task to singlelabel).
+
+name: local-emotion
+output_dir: results/local-emotion
+cache_dir: cache/local-emotion
+seeds: [13, 42, 1234]
+
+data:
+  source: local
+  local_dir: data/emotion
+  local_suffix: csv
+  hf_text_column: text
+  languages: [eng, amh, hau]
+  source_languages: [eng]
+  task: multilabel
+  emotions: [anger, disgust, fear, joy, sadness, surprise]
+
+encoder:
+  model_name: xlm-roberta-base
+  pooling: mean
+  max_length: 128
+  batch_size: 64
+
+probe:
+  kind: logreg
+  C: [0.01, 0.1, 1.0, 10.0]
+
+combinations:
+  individual_layers: true
+  average_all: true
+  window_sizes: [4]
+  scalar_mix: true

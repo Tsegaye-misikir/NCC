@@ -1,0 +1,276 @@
+# Which transformer layers make good emotion representations for low-resource languages?
+
+This document describes the study implemented in [`layerprobe/`](../layerprobe):
+what it measures, how to run it, how to read what comes out, and what it
+cannot tell you.
+
+---
+
+## 1. The question
+
+A multilingual encoder such as XLM-R does not distribute information evenly
+across its layers. Lower layers stay close to the surface form and keep
+language identity readily available; middle layers are the most
+language-neutral, which is why word-alignment and cross-lingual retrieval
+work best there; upper layers specialise back towards the pretraining
+objective, which for a masked language model means re-introducing
+language-specific, token-level information.
+
+Almost every emotion classifier nonetheless takes the **final** layer, because
+that is what `AutoModel(...).last_hidden_state` hands you. For a
+high-resource language that is usually fine. For a low-resource language,
+where a probe has a few hundred training sentences and often has to lean on
+cross-lingual transfer from English, the default may be actively bad: if the
+final layer keeps language identity linearly available, a probe trained on
+English can key on English-specific directions that mean nothing in Amharic.
+
+So the study asks three things:
+
+1. **Which single layer** gives the best emotion representation, and does the
+   answer differ between high- and low-resource languages?
+2. **Do simple combinations** — an unweighted average over a window of
+   layers, or a learned weighted mixture — beat the best single layer?
+3. **Does a better representation reduce negative cross-lingual transfer**,
+   i.e. close the gap between a zero-shot probe and an in-language one?
+
+## 2. Design
+
+### Frozen encoder, weak probe
+
+The encoder is never fine-tuned. Fine-tuning would let the model *move* the
+information to wherever the classifier needs it, which would answer a
+different (also interesting, but different) question. Freezing it means the
+comparison is about what the pretrained representation already contains.
+
+For the same reason the probe is deliberately weak. A high-capacity
+classifier can extract the emotion signal from almost any layer given enough
+parameters, flattening exactly the differences we want to see. The default
+probe is one-vs-rest logistic regression; `probe.kind: mlp` runs a
+one-hidden-layer network as a robustness check.
+
+### Pooling
+
+Each layer's token states are pooled into one vector per sentence with a
+**mask-aware mean** (padding excluded). `cls` and `max` are available. Mean
+pooling is the default because `<s>`/CLS is untrained in a model that was
+never fine-tuned with a sentence-level objective, which systematically
+disadvantages the upper layers and would bias the comparison.
+
+Pooled features are standardised before the probe sees them
+(`probe.standardize`). This matters more than it sounds: activation norms
+differ by an order of magnitude between layers, and without standardisation
+the regularisation strength `C` means something different at each layer, so
+the layer comparison would be confounded by scale.
+
+### What is compared
+
+| Family | Example | What it tests |
+| --- | --- | --- |
+| single layer | `layer0` … `last` | the layer-by-layer profile |
+| final layer | `last` | the default everyone uses — the baseline |
+| average over all | `avg_all` | is a free, tuning-less average enough? |
+| sliding windows | `avg6-9` | is there a contiguous band that carries emotion? |
+| thirds | `avg_bottom`, `avg_middle`, `avg_top` | coarse depth regions |
+| concatenation | `concat_mid_top` | more expressive, but more probe parameters |
+| learned mixture | `scalar_mix` | what the task asks for when allowed to choose |
+
+`scalar_mix` is an ELMo-style scalar mix: `γ · Σ_l softmax(w)_l · LayerNorm(h_l)`,
+with `w` and `γ` learned jointly with a linear classifier. Its learned
+weights are reported (`layer_weights_mean`, and `scalar_mix_weights.png`) and
+are a result in their own right — they locate the useful layers without a
+grid search. The per-layer `LayerNorm` is what stops a high-norm layer from
+winning the mixture on scale alone.
+
+### The three regimes
+
+- **`monolingual`** — train and test in the same language. Establishes the
+  in-language ceiling and shows whether the best layer moves with training
+  set size.
+- **`zeroshot`** — train on the source language(s), test on a target never
+  seen in training. Model selection (`C`, threshold) stays on **source**
+  dev data; using target dev would make it few-shot, not zero-shot.
+- **`multilingual`** — train once on all languages pooled, test per language.
+  Shows whether representation choice also reduces the interference joint
+  training introduces.
+
+### Metrics
+
+**Macro-F1** is the headline. Emotion corpora for low-resource languages are
+small and skewed; accuracy and micro-F1 both reward a probe for ignoring the
+rare emotions, which is precisely the failure mode we care about. The
+multi-label decision threshold is tuned on dev (a single global threshold —
+per-emotion thresholds overfit a few hundred dev examples).
+
+Two derived columns carry the cross-lingual story:
+
+- `transfer_gap = in_language_macro_f1 − zero_shot_macro_f1`. Positive means
+  training out-of-language cost you performance — the negative-transfer
+  regime. Negative means zero-shot beat the language's own probe, which does
+  happen when the target's training set is tiny.
+- `above_majority = macro_f1 − majority_macro_f1`. The sanity check. A
+  cross-lingual probe that does not clear the majority-class baseline has
+  transferred nothing, however respectable its F1 looks.
+
+### Error bars
+
+Each configuration is run over `seeds`. A logistic probe is deterministic, so
+seeds alone would produce zero variance; each seed therefore also draws its
+own 90% subsample of the training set (`probe.train_subsample`). The
+resulting standard deviation measures the thing worth measuring for a
+low-resource corpus: how sensitive a layer's advantage is to *which* few
+hundred sentences you happened to train on. All combinations at a given seed
+see the same subsample, so the comparison between layers stays paired.
+
+`layerprobe.metrics.paired_bootstrap` turns two configurations' per-seed
+scores into a p-value. **Use it before claiming a layer is better** — with
+three seeds, a one-point macro-F1 gap is usually noise.
+
+### Diagnostics
+
+Two measurements explain *why* a layer transfers:
+
+- **Language-identification probe** — a linear classifier predicting which
+  language a sentence is in, from the same pooled vector. High accuracy means
+  the layer keeps language identity linearly available, which is what lets a
+  cross-lingual probe latch onto language-specific directions.
+  `language_specificity` rescales this to 0 at chance and 1 at perfect
+  identifiability (it can dip slightly below 0 as sampling noise, and is
+  deliberately not clamped).
+- **Linear CKA** between two languages' representations at the same layer:
+  how similarly does the layer *organise* the two sets of sentences? CKA is
+  invariant to rotation and isotropic scaling, which is what makes it usable
+  across languages.
+- **Centroid cosine** between the two languages' mean vectors: do the two
+  clouds sit in the same *place*?
+
+The last two are not redundant, and the difference is easy to get wrong. CKA
+centres each side before comparing, so it is **blind to a constant offset
+between two languages** — and a constant offset is precisely what breaks a
+linear probe carried from one language to another. Expect a layer to be able
+to show high CKA and still transfer badly, and expect centroid cosine to be
+the better predictor of zero-shot macro-F1. (The offline smoke run reproduces
+exactly this: centroid cosine peaks where zero-shot performance peaks, while
+CKA stays flat.) Report both.
+
+`diagnostics_correlation` in `results.json` correlates all three against
+zero-shot macro-F1 across layers. With 13 layers these correlations are
+**indicative, not confirmatory** — they are a hypothesis generator, and the
+`n_layers` field is reported next to them so nobody forgets the sample size.
+
+## 3. Running it
+
+```bash
+pip install -r requirements.txt
+```
+
+### Offline smoke run (no downloads, about a minute)
+
+```bash
+python run_experiments.py --config configs/smoke.yaml
+```
+
+This uses a synthetic corpus and a synthetic encoder. It exists to prove the
+pipeline works end to end and to show you the shape of every output file.
+**Its numbers are not findings** — the synthetic encoder has a
+language-neutrality curve written into it by hand.
+
+### The real study
+
+```bash
+python run_experiments.py --config configs/brighter.yaml
+```
+
+`configs/brighter.yaml` targets the SemEval-2025 Task 11 / BRIGHTER
+multi-label emotion corpora with `xlm-roberta-base`. **Check `hf_path` and
+`hf_name_template` against the dataset card before the first run** — dataset
+ids and per-language config names move, and a few languages use a different
+emotion inventory. A mismatch shows up immediately as an all-zero column in
+`data_summary.csv`, which is why that file is written first.
+
+For your own data, see `configs/local_csv.yaml`.
+
+Useful overrides:
+
+```bash
+python run_experiments.py --config configs/brighter.yaml \
+    --model xlm-roberta-large \
+    --languages eng amh hau tir \
+    --source-languages eng \
+    --seeds 1 2 3 4 5
+```
+
+### Cost
+
+Features are extracted once per (language, split) and cached in `cache_dir`,
+keyed by a fingerprint of the encoder settings *and* the texts, so a stale
+cache cannot silently poison a run. After the first pass, re-running the
+probes is CPU-only and takes minutes. Extraction of ~20k sentences with
+`xlm-roberta-base` is a few minutes on a single GPU and roughly an hour on
+CPU.
+
+Cache size is the thing to watch: all 13 layers of 20k sentences at 768
+dimensions is about 800 MB compressed. Restrict `encoder.layers` if that is a
+problem.
+
+## 4. Output
+
+Written to `output_dir`:
+
+| File | Contents |
+| --- | --- |
+| `SUMMARY.md` | the digest: best combination per setting, rankings, transfer gaps |
+| `results.csv` | every (experiment, language, combination) with mean/std |
+| `best.csv` | winner per setting, with `gain_over_last` |
+| `layer_ranking.csv` | mean rank of each combination across languages |
+| `language_probe.csv` | per-layer language identifiability |
+| `alignment.csv` | per-layer cross-lingual CKA and centroid cosine |
+| `data_summary.csv` | split sizes and per-emotion positive rates |
+| `results.json` | everything above, plus per-seed scores and layer weights |
+| `config.yaml` | the exact configuration that produced these files |
+| `*.png` | layer curves, combination bars, mix weights, diagnostics |
+
+### Reading it
+
+Start with `SUMMARY.md`, then:
+
+- **`layer_curve_zeroshot.png`** is the main figure. A curve that peaks well
+  before the final layer is the study's central claim, made visible.
+- **`gain_over_last` in `best.csv`** is the headline number: how much you were
+  losing by taking the default.
+- **`layer_ranking.csv`** is what you should actually act on. A combination
+  that wins in one language and collapses in another is not a recommendation;
+  mean rank across languages is what survives.
+- **`scalar_mix_weights.png`** should broadly agree with the single-layer
+  curve. If it does not, something is off — most often that a layer's
+  activation norm is dominating, so check `scalar_mix.layer_norm`.
+
+## 5. Limitations
+
+- **Frozen features only.** A layer that probes badly may still fine-tune
+  well. Nothing here predicts fine-tuning behaviour.
+- **Pooling is a confound.** Mean pooling over a layer is not the same as the
+  layer. Some of any layer-to-layer difference is a difference in how well
+  that layer's geometry survives averaging. Re-running with
+  `--pooling cls` is the cheap check.
+- **Correlation over 13 points.** The diagnostics-versus-transfer
+  correlations are suggestive at best.
+- **One encoder at a time.** Findings for `xlm-roberta-base` need not hold
+  for `-large` (24 layers, different depth profile), mBERT, or LaBSE. The
+  config makes re-running cheap; do it before generalising.
+- **Corpus artefacts.** BRIGHTER's per-language datasets differ in domain,
+  annotation guidelines and size. A per-language difference in best layer may
+  be a difference in corpus, not in language. `max_train_per_language`
+  equalises size, which is the one confound that is cheap to remove.
+
+## 6. Extending it
+
+- **Another encoder**: `--model` anything with `output_hidden_states`.
+  `HFEncoder` reads its depth off the model config.
+- **Another dataset**: add a loader to `layerprobe/data.py` returning
+  `EmotionSplit` objects; everything downstream is agnostic.
+- **Another combination**: add a `kind` to `layerprobe/combinations.py` and a
+  branch in `materialize`.
+- **Another diagnostic**: add it to `layerprobe/analysis.py` and reference it
+  from `pipeline.run_experiment`.
+
+Tests: `python -m pytest tests/ -q` (81 tests, ~75 s, no network).

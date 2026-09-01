@@ -1,0 +1,51 @@
+# Offline smoke run.
+#
+# Downloads nothing: the corpus is generated in-process and the "encoder" is
+# a deterministic stand-in (see layerprobe/encoders.py::SyntheticEncoder).
+# Its purpose is to prove the pipeline runs end to end and to produce the
+# shape of every output file. The numbers it produces are NOT findings about
+# XLM-R or about any real language -- use configs/brighter.yaml for that.
+
+name: smoke
+output_dir: results/smoke
+cache_dir: cache/smoke
+seeds: [13, 42]
+
+run_monolingual: true
+run_zeroshot: true
+run_multilingual: true
+
+data:
+  source: synthetic
+  languages: [eng, amh, hau]
+  source_languages: [eng]
+  task: multilabel
+  emotions: [anger, disgust, fear, joy, sadness, surprise]
+  synthetic_size: 300
+
+encoder:
+  model_name: synthetic
+  pooling: mean
+  synthetic_hidden_size: 48
+  synthetic_num_layers: 12
+
+probe:
+  kind: logreg
+  C: [1.0]
+  max_iter: 500
+
+scalar_mix:
+  enabled: true
+  epochs: 25
+  learning_rate: 0.01
+
+combinations:
+  individual_layers: true
+  average_all: true
+  window_sizes: [4]
+  scalar_mix: true
+
+analysis:
+  language_probe: true
+  cka: true
+  cka_max_samples: 200
