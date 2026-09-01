@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Layer-probing study outputs. Experiment results are reproduced by
+# `python run_experiments.py --config <config>`; the cache can be large
+# (all layers of a corpus at 768 dimensions runs to hundreds of megabytes).
+cache/
+results/
+
+.venv/
+venv/
+.DS_Store

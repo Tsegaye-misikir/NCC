@@ -1,4 +1,12 @@
-Please note that all Jupyter Notebooks within this folder were run in google colab. 
+Notebooks 1 to 4 belong to the inter-lingual document representation work.
+Notebook 5 (5_Layerwise_Emotion_Probing) belongs to the separate layer-wise
+emotion study; it is self-contained, clones the repository itself when run in
+colab, and needs none of the JRC-Acquis / EU-Bookshop files described below.
+See docs/LAYERWISE_EMOTION.md for that study.
+
+---
+
+Please note that all Jupyter Notebooks within this folder were run in google colab.
 They will run within colab but might not if run locally. To run them yourself, 
 first upload the files to google colab. 
 

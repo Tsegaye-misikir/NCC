@@ -1,0 +1,85 @@
+# The main study: XLM-R layers as emotion representations across the
+# low-resource languages of SemEval-2025 Task 11 (the BRIGHTER corpora).
+#
+# Track A of that task is multi-label emotion detection over
+# anger / disgust / fear / joy / sadness / surprise, with one dataset config
+# per language. Amharic, Hausa, Oromo, Tigrinya, Kinyarwanda and Swahili are
+# the low-resource targets here; English and Spanish are the higher-resource
+# sources the zero-shot probes train on.
+#
+# Check the dataset card before the first run: hf_path and hf_name_template
+# must match how the copy you have access to is laid out, and the emotion
+# inventory differs for a few languages (some add "neutral", the Amharic and
+# Tigrinya sets do not annotate surprise the same way). Anything mismatched
+# surfaces immediately as an all-zero label column in data_summary.csv.
+
+name: brighter-xlmr
+output_dir: results/brighter-xlmr
+cache_dir: cache/brighter-xlmr
+seeds: [13, 42, 1234]
+
+run_monolingual: true
+run_zeroshot: true
+run_multilingual: true
+
+data:
+  source: hf
+  hf_path: brighter-dataset/BRIGHTER-emotion-categories
+  hf_name_template: "{language}"
+  hf_text_column: text
+  languages: [eng, amh, hau, orm, tir, kin, swa]
+  source_languages: [eng]
+  # target_languages defaults to "everything that is not a source"
+  task: multilabel
+  emotions: [anger, disgust, fear, joy, sadness, surprise]
+  # Equalise training-set sizes so that a layer is not credited for a
+  # language simply having more data. Raise or drop once the layer ranking
+  # is established, to see how it moves with training size.
+  max_train_per_language: 2000
+  max_eval_per_language: 1000
+  dev_fraction: 0.1
+  test_fraction: 0.2
+
+encoder:
+  model_name: xlm-roberta-base
+  pooling: mean          # mask-aware mean; try cls as a robustness check
+  max_length: 128
+  batch_size: 64
+  device: null           # cuda when available
+  half_precision: true
+  layers: null           # all 13 (embeddings + 12 blocks)
+  normalize: false
+
+probe:
+  kind: logreg
+  C: [0.01, 0.1, 1.0, 10.0]
+  max_iter: 3000
+  standardize: true
+  threshold: null        # tuned on dev
+
+scalar_mix:
+  enabled: true
+  epochs: 80
+  learning_rate: 0.005
+  weight_decay: 0.0001
+  batch_size: 64
+  temperature: 1.0
+  learn_gamma: true
+  layer_norm: true
+
+combinations:
+  individual_layers: true
+  average_all: true
+  window_sizes: [4]
+  named_windows:
+    avg_bottom: [0, 1, 2, 3]
+    avg_middle: [4, 5, 6, 7, 8]
+    avg_top: [9, 10, 11, 12]
+  concat_groups:
+    concat_mid_top: [8, 12]
+  scalar_mix: true
+
+analysis:
+  language_probe: true
+  cka: true
+  cka_max_samples: 500
