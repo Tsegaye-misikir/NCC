@@ -323,3 +323,71 @@ def test_cli_runs_the_smoke_config(tmp_path):
     )
     assert exit_code == 0
     assert (tmp_path / "out" / "SUMMARY.md").exists()
+
+
+# --------------------------------------------------------------------------
+# config inheritance and multi-model configs
+# --------------------------------------------------------------------------
+
+
+def test_extends_merges_sections_from_the_parent(tmp_path):
+    (tmp_path / "base.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "seeds": [1, 2],
+                "data": {"source": "synthetic", "languages": ["eng", "amh"], "source_languages": ["eng"]},
+                "encoder": {"model_name": "xlm-roberta-base", "pooling": "mean", "max_length": 128},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "child.yaml").write_text(
+        yaml.safe_dump(
+            {"extends": "base.yaml", "name": "child", "encoder": {"model_name": "Qwen/Qwen3-0.6B-Base",
+                                                                  "pooling": "last_token"}}),
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path / "child.yaml")
+    assert cfg.name == "child"
+    assert cfg.encoder.model_name == "Qwen/Qwen3-0.6B-Base"
+    assert cfg.encoder.pooling == "last_token"
+    # untouched keys survive from the parent, at both levels
+    assert cfg.encoder.max_length == 128
+    assert cfg.seeds == [1, 2]
+    assert cfg.data.languages == ["eng", "amh"]
+
+
+def test_extends_rejects_a_cycle(tmp_path):
+    (tmp_path / "a.yaml").write_text(yaml.safe_dump({"extends": "b.yaml"}), encoding="utf-8")
+    (tmp_path / "b.yaml").write_text(yaml.safe_dump({"extends": "a.yaml"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="circular 'extends'"):
+        load_config(tmp_path / "a.yaml")
+
+
+def test_extends_reports_a_missing_parent(tmp_path):
+    (tmp_path / "a.yaml").write_text(yaml.safe_dump({"extends": "nope.yaml"}), encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="nope.yaml"):
+        load_config(tmp_path / "a.yaml")
+
+
+def test_shipped_model_configs_parse_and_share_one_data_block():
+    paths = sorted(p for p in Path("configs/models").glob("*.yaml") if not p.name.startswith("_"))
+    assert paths, "no model configs found"
+    configs = {p.stem: load_config(p) for p in paths}
+    for name, cfg in configs.items():
+        assert cfg.data.languages == configs["xlmr"].data.languages, name
+        assert cfg.data.source_languages == configs["xlmr"].data.source_languages, name
+        assert cfg.seeds == configs["xlmr"].seeds, name
+        # each model must write somewhere different, or runs overwrite each other
+        assert cfg.output_dir != configs["xlmr"].output_dir or name == "xlmr", name
+    assert configs["qwen"].encoder.pooling == "last_token"
+    assert configs["xlmr"].encoder.pooling == "mean"
+
+
+def test_model_configs_leave_layer_windows_depth_relative():
+    """Hard-coded windows would be wrong for models of differing depth."""
+
+    for path in sorted(Path("configs/models").glob("*.yaml")):
+        cfg = load_config(path)
+        assert not cfg.combinations.named_windows, f"{path.name} hard-codes named_windows"
+        assert not cfg.combinations.concat_groups, f"{path.name} hard-codes concat_groups"

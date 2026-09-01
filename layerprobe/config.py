@@ -79,14 +79,28 @@ class EncoderConfig:
     """The frozen multilingual encoder and how its layers are pooled."""
 
     #: A Hugging Face model id, or ``synthetic`` for the offline stand-in.
+    #: Masked encoders (xlm-roberta-*, mBERT, LaBSE) and decoder-only LLMs
+    #: (Qwen, Llama, Gemma, Mistral) are both supported; see ``pooling``.
     model_name: str = "synthetic"
-    #: ``mean`` (mask-aware mean over tokens), ``cls`` or ``max``.
+    #: ``mean`` (mask-aware mean over tokens), ``cls``, ``max``, or
+    #: ``last_token``.  Use ``last_token`` or ``mean`` for a decoder-only
+    #: model -- ``cls`` is rejected there, because under causal attention the
+    #: first token has seen nothing but itself.
     pooling: str = "mean"
     max_length: int = 128
     batch_size: int = 32
     device: Optional[str] = None  # ``None`` -> cuda when available, else cpu
-    #: fp16 activations during extraction; ignored on CPU.
+    #: Shorthand for bf16 on GPU; ignored on CPU, where it is slower than fp32.
     half_precision: bool = False
+    #: ``auto`` (follow ``half_precision``), ``float32``, ``float16``, ``bfloat16``.
+    dtype: str = "auto"
+    #: Required by a few checkpoints that ship custom modelling code.  Only
+    #: enable it for a model you trust: it executes code from the repository.
+    trust_remote_code: bool = False
+    #: Measure tokens-per-character and truncation rate per language.  Cheap,
+    #: and the only way to see whether two models are being compared on
+    #: comparable amounts of text.
+    report_fertility: bool = True
     #: Layers to keep. ``None`` keeps all of them, embeddings (layer 0) included.
     layers: Optional[List[int]] = None
     #: L2-normalise each pooled vector.  Off by default so that layer norm
@@ -247,9 +261,46 @@ def config_from_dict(payload: Dict[str, Any]) -> ExperimentConfig:
     return ExperimentConfig(**payload, **sections)
 
 
-def load_config(path: str | Path) -> ExperimentConfig:
-    """Read a YAML experiment description from disk."""
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge ``override`` onto ``base``, recursing one level into sections."""
 
-    with Path(path).open(encoding="utf-8") as fh:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _load_yaml_with_extends(path: Path, _seen: Optional[List[Path]] = None) -> Dict[str, Any]:
+    """Load YAML, resolving an optional ``extends:`` parent path.
+
+    Lets the per-model configs state only what differs from a shared base --
+    the same corpus, the same seeds, one encoder swapped -- so that a change
+    to the data block cannot drift between models and quietly make their
+    numbers incomparable.
+    """
+
+    path = path.resolve()
+    _seen = list(_seen or [])
+    if path in _seen:
+        chain = " -> ".join(p.name for p in _seen + [path])
+        raise ValueError(f"circular 'extends' in config chain: {chain}")
+    _seen.append(path)
+
+    with path.open(encoding="utf-8") as fh:
         payload = yaml.safe_load(fh) or {}
-    return config_from_dict(payload)
+    parent_ref = payload.pop("extends", None)
+    if parent_ref is None:
+        return payload
+    parent_path = (path.parent / str(parent_ref)).resolve()
+    if not parent_path.exists():
+        raise FileNotFoundError(f"{path.name} extends {parent_ref!r}, which does not exist")
+    return _deep_merge(_load_yaml_with_extends(parent_path, _seen), payload)
+
+
+def load_config(path: str | Path) -> ExperimentConfig:
+    """Read a YAML experiment description from disk, resolving ``extends``."""
+
+    return config_from_dict(_load_yaml_with_extends(Path(path)))

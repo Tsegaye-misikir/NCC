@@ -1,0 +1,18 @@
+# Gemma 3 1B: decoder-only, 26 blocks (27 layers with embeddings).
+#
+# GATED on the Hub, like Llama: accept the licence and log in first.
+# Gemma scales its embeddings by sqrt(hidden_size), so layer 0 has a much
+# larger norm than the blocks above it. Probe standardisation and the scalar
+# mix's per-layer LayerNorm both handle that, but it is the reason those two
+# settings should stay on for this model.
+extends: _base.yaml
+
+name: gemma-3-1b
+output_dir: results/models/gemma-3-1b
+
+encoder:
+  model_name: google/gemma-3-1b-pt
+  pooling: last_token
+  max_length: 128
+  batch_size: 16
+  half_precision: true

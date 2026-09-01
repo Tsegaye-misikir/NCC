@@ -31,6 +31,9 @@ import numpy as np
 from layerprobe.config import EncoderConfig
 
 
+POOLINGS = ("mean", "cls", "max", "last_token")
+
+
 def _pool(states: "np.ndarray | object", mask, pooling: str):
     """Pool ``(batch, seq, hidden)`` token states down to ``(batch, hidden)``.
 
@@ -39,6 +42,14 @@ def _pool(states: "np.ndarray | object", mask, pooling: str):
     """
 
     import torch
+
+    if pooling == "last_token":
+        # The only sound single-token choice for a causal model: with
+        # unidirectional attention the final real token is the only position
+        # that has seen the whole sentence.  Found from the mask rather than
+        # by taking [:, -1], so it is correct under either padding side.
+        idx = _last_real_index(mask)
+        return states[torch.arange(states.shape[0], device=states.device), idx]
 
     mask = mask.unsqueeze(-1).to(states.dtype)
     if pooling == "cls":
@@ -50,7 +61,23 @@ def _pool(states: "np.ndarray | object", mask, pooling: str):
     if pooling == "max":
         neg_inf = torch.finfo(states.dtype).min
         return (states.masked_fill(mask == 0, neg_inf)).max(dim=1).values
-    raise ValueError(f"unknown pooling {pooling!r}; expected 'mean', 'cls' or 'max'")
+    raise ValueError(f"unknown pooling {pooling!r}; expected one of {POOLINGS}")
+
+
+def _last_real_index(mask):
+    """Index of the final unmasked token in each row, for either padding side.
+
+    Right padding gives ``[1,1,1,0,0]`` and left padding ``[0,0,1,1,1]``;
+    reversing and taking the first hit locates the last real token in both.
+    """
+
+    import torch
+
+    flipped = torch.flip(mask, dims=[1])
+    from_end = torch.argmax(flipped.to(torch.int32), dim=1)
+    idx = mask.shape[1] - 1 - from_end
+    # An all-zero row (no real tokens) would otherwise index the last column.
+    return torch.where(mask.sum(dim=1) > 0, idx, torch.zeros_like(idx))
 
 
 class BaseEncoder:
@@ -89,9 +116,14 @@ class HFEncoder(BaseEncoder):
         if model is None or tokenizer is None:
             from transformers import AutoConfig, AutoModel, AutoTokenizer
 
-            tokenizer = tokenizer or AutoTokenizer.from_pretrained(cfg.model_name)
-            model_config = AutoConfig.from_pretrained(cfg.model_name, output_hidden_states=True)
-            model = model or AutoModel.from_pretrained(cfg.model_name, config=model_config)
+            kwargs = {"trust_remote_code": cfg.trust_remote_code}
+            tokenizer = tokenizer or AutoTokenizer.from_pretrained(cfg.model_name, **kwargs)
+            model_config = AutoConfig.from_pretrained(
+                cfg.model_name, output_hidden_states=True, **kwargs
+            )
+            model = model or AutoModel.from_pretrained(
+                cfg.model_name, config=model_config, dtype=self._dtype(), **kwargs
+            )
         self.tokenizer = tokenizer
         self.model = model
         # Some checkpoints default to not returning hidden states; insist.
@@ -99,11 +131,112 @@ class HFEncoder(BaseEncoder):
         self.model.eval().to(self.device)
         for param in self.model.parameters():
             param.requires_grad_(False)
-        if cfg.half_precision and self.device.type == "cuda":
-            self.model.half()
 
-        self.hidden_size = int(self.model.config.hidden_size)
-        self.num_layers = int(self.model.config.num_hidden_layers)
+        self._prepare_tokenizer()
+        self.hidden_size = int(self._config_value("hidden_size"))
+        self.num_layers = int(self._config_value("num_hidden_layers"))
+        self._check_pooling()
+
+    def _config_value(self, name: str):
+        """Read a field that multimodal configs nest under ``text_config``."""
+
+        config = self.model.config
+        if hasattr(config, name):
+            return getattr(config, name)
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None and hasattr(text_config, name):
+            return getattr(text_config, name)
+        raise AttributeError(f"{self.cfg.model_name} config exposes no {name!r}")
+
+    def _dtype(self):
+        """Resolve ``encoder.dtype`` into a torch dtype (``None`` == leave alone)."""
+
+        torch = self.torch
+        name = (self.cfg.dtype or "auto").lower()
+        if name == "auto":
+            # bf16 halves memory and is ~free on a modern GPU; on CPU it is
+            # markedly slower than fp32, so only opt in where it pays.
+            if self.cfg.half_precision and self.device.type == "cuda":
+                return torch.bfloat16
+            return None
+        return {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[name]
+
+    def _prepare_tokenizer(self) -> None:
+        """Make a decoder-only tokenizer usable for batched feature extraction.
+
+        Causal LMs are shipped for generation: most have no pad token at all,
+        and several pad on the left.  Batching without a pad token raises;
+        padding side is harmless here because every pooling mode consults the
+        attention mask rather than assuming a position.
+        """
+
+        if getattr(self.tokenizer, "pad_token", None) is None:
+            eos = getattr(self.tokenizer, "eos_token", None)
+            if eos is None:
+                raise ValueError(
+                    f"{self.cfg.model_name} has neither a pad nor an eos token; "
+                    "batched extraction needs one to pad with"
+                )
+            self.tokenizer.pad_token = eos
+
+    def _check_pooling(self) -> None:
+        """Warn when the pooling choice does not suit the architecture."""
+
+        if self.cfg.pooling != "cls":
+            return
+        if self.is_causal:
+            raise ValueError(
+                f"pooling='cls' is meaningless for the decoder-only model "
+                f"{self.cfg.model_name}: with causal attention the first token has "
+                "seen nothing but itself. Use 'last_token' or 'mean'."
+            )
+
+    @property
+    def is_causal(self) -> bool:
+        """Whether the model attends unidirectionally (a decoder-only LLM)."""
+
+        config = self.model.config
+        if getattr(config, "is_decoder", False):
+            return True
+        architectures = getattr(config, "architectures", None) or []
+        if any("ForCausalLM" in str(a) for a in architectures):
+            return True
+        # Fall back to the model class name: AutoModel strips the LM head, so
+        # a bare LlamaModel/Qwen3Model/Gemma3TextModel still reaches here.
+        name = type(self.model).__name__
+        return any(tag in name for tag in ("Llama", "Qwen", "Gemma", "Mistral", "GPT", "Falcon"))
+
+    def fertility(self, texts: Sequence[str]) -> dict:
+        """Tokens per character, and how much of the corpus gets truncated.
+
+        A confound that bites hard when comparing models: XLM-R's
+        SentencePiece vocabulary was built with Amharic and Hausa in it,
+        while an English-centric BPE can spend several tokens per character
+        on the same script.  At a fixed ``max_length`` the two models
+        therefore see *different amounts of text*, and a layer comparison
+        across models silently becomes a comparison of how much got cut off.
+        Reported per language so that bias is visible rather than assumed
+        away.
+        """
+
+        lengths, truncated, chars = [], 0, 0
+        for text in texts:
+            # truncation off on purpose: the whole point is to see how much
+            # would have been cut, which a truncated count cannot show.
+            ids = self.tokenizer(str(text), add_special_tokens=True, truncation=False)["input_ids"]
+            lengths.append(len(ids))
+            chars += max(1, len(str(text)))
+            if len(ids) > self.cfg.max_length:
+                truncated += 1
+        if not lengths:
+            return {}
+        return {
+            "tokens_per_char": float(sum(lengths) / chars),
+            "mean_tokens": float(np.mean(lengths)),
+            "p95_tokens": float(np.percentile(lengths, 95)),
+            "max_length": int(self.cfg.max_length),
+            "truncated_fraction": float(truncated / len(lengths)),
+        }
 
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         torch = self.torch

@@ -1,0 +1,20 @@
+# Qwen3 0.6B: decoder-only, 28 blocks (29 layers with embeddings).
+#
+# Not gated on the Hub, which makes it the easiest of the three to run.
+# Strong on English and Chinese; its coverage of the African target
+# languages is far thinner than XLM-R's, and the fertility table in the
+# output will show that directly.
+extends: _base.yaml
+
+name: qwen3-0.6b
+output_dir: results/models/qwen3-0.6b
+
+encoder:
+  model_name: Qwen/Qwen3-0.6B-Base
+  # last_token is the standard read-out for a causal model: it is the only
+  # position that has attended to the whole sentence. Re-run with mean as a
+  # robustness check -- for probing, mean often wins.
+  pooling: last_token
+  max_length: 128
+  batch_size: 16         # 1024-dim x 29 layers is much heavier than XLM-R
+  half_precision: true

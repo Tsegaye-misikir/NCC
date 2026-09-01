@@ -42,14 +42,25 @@ python run_experiments.py --config configs/smoke.yaml
 python run_experiments.py --config configs/brighter.yaml
 ```
 
+Both masked encoders (XLM-R, mBERT, LaBSE) and decoder-only LLMs (Qwen,
+Llama, Gemma, Mistral) are supported, and several runs can be compared:
+
+```bash
+python run_experiments.py --config configs/models/xlmr.yaml
+python run_experiments.py --config configs/models/qwen.yaml
+python compare_models.py results/models/* --experiment zeroshot
+```
+
 | Path | Contents |
 | --- | --- |
 | `docs/LAYERWISE_EMOTION.md` | **Start here** — methodology, how to run, how to read the output, limitations |
 | `layerprobe/` | The package: data loading, layer extraction, combinations, probes, diagnostics, reporting |
-| `configs/` | `smoke.yaml` (offline), `brighter.yaml` (SemEval-2025 Task 11), `local_csv.yaml` (your own files) |
+| `configs/` | `smoke.yaml` (offline), `brighter.yaml` (SemEval-2025 Task 11), `brighter_cpu.yaml` (fast first pass), `local_csv.yaml` (your own files) |
+| `configs/models/` | One config per encoder, all extending a shared base so the models stay comparable |
 | `run_experiments.py` | CLI entry point |
+| `compare_models.py` | Cross-model tables and plots, on a relative-depth axis |
 | `Notebooks/5_Layerwise_Emotion_Probing.ipynb` | Colab-ready walkthrough of a run and its results |
-| `tests/` | `python -m pytest tests/ -q` — 81 tests, no network needed |
+| `tests/` | `python -m pytest tests/ -q` — 123 tests, no network needed |
 
 Alongside the probing tables the run reports two diagnostics that explain the
 numbers: a per-layer language-identification probe (how language-specific is

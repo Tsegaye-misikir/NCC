@@ -18,6 +18,10 @@ class _StubTokenizer:
 
     def __init__(self, vocab_size: int = 50):
         self.vocab_size = vocab_size
+        # A masked encoder's tokenizer always ships a pad token, unlike the
+        # causal ones exercised in test_decoder_encoders.py.
+        self.pad_token = "<pad>"
+        self.eos_token = "</s>"
 
     def __call__(self, batch, padding=True, truncation=True, max_length=16, return_tensors="pt"):
         sequences = [

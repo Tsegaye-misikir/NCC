@@ -72,6 +72,9 @@ def _fingerprint(cfg: EncoderConfig, split: EmotionSplit) -> str:
         "max_length": cfg.max_length,
         "normalize": cfg.normalize,
         "layers": cfg.layers,
+        # dtype changes the numbers, so it must change the cache key too.
+        "dtype": cfg.dtype,
+        "half_precision": cfg.half_precision,
         "synthetic_hidden_size": cfg.synthetic_hidden_size,
         "synthetic_num_layers": cfg.synthetic_num_layers,
         "synthetic_noise": cfg.synthetic_noise,

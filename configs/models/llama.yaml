@@ -1,0 +1,15 @@
+# Llama 3.2 1B: decoder-only, 16 blocks (17 layers with embeddings).
+#
+# GATED on the Hub: accept the licence on the model page and log in
+# (`huggingface-cli login`) before the first run, or loading fails with 401.
+extends: _base.yaml
+
+name: llama-3.2-1b
+output_dir: results/models/llama-3.2-1b
+
+encoder:
+  model_name: meta-llama/Llama-3.2-1B
+  pooling: last_token
+  max_length: 128
+  batch_size: 16
+  half_precision: true

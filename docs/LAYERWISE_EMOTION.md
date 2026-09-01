@@ -51,10 +51,18 @@ one-hidden-layer network as a robustness check.
 ### Pooling
 
 Each layer's token states are pooled into one vector per sentence with a
-**mask-aware mean** (padding excluded). `cls` and `max` are available. Mean
-pooling is the default because `<s>`/CLS is untrained in a model that was
-never fine-tuned with a sentence-level objective, which systematically
-disadvantages the upper layers and would bias the comparison.
+**mask-aware mean** (padding excluded). `cls`, `max` and `last_token` are
+available. Mean pooling is the default because `<s>`/CLS is untrained in a
+model that was never fine-tuned with a sentence-level objective, which
+systematically disadvantages the upper layers and would bias the comparison.
+
+For a **decoder-only** model use `last_token` or `mean`. `cls` is rejected
+outright there: under causal attention the first token has attended to
+nothing but itself, so it carries no sentence content. `last_token` is the
+only sound single-token read-out, because the final real token is the only
+position that has seen the whole sentence. It is located from the attention
+mask rather than by taking `[:, -1]`, so it is correct whether the tokenizer
+pads left (the usual default for causal LMs) or right.
 
 Pooled features are standardised before the probe sees them
 (`probe.standardize`). This matters more than it sounds: activation norms
@@ -270,6 +278,70 @@ Start with `SUMMARY.md`, then:
   curve. If it does not, something is off — most often that a layer's
   activation norm is dominating, so check `scalar_mix.layer_norm`.
 
+## 4b. Comparing several models
+
+`configs/models/` holds one config per encoder, each `extends: _base.yaml`
+so that the corpus, the splits, the seeds and the probe are defined **once**.
+That is not tidiness for its own sake: if the data block drifted between
+models, the differences you measure would be differences in the experiment
+rather than in the model.
+
+```bash
+python run_experiments.py --config configs/models/xlmr.yaml
+python run_experiments.py --config configs/models/qwen.yaml
+python compare_models.py results/models/* --experiment zeroshot
+```
+
+`compare_models.py` reads each run's `results.json` and prints the best
+combination per model and language, the mean gain over the final layer, and
+the fertility table. It writes CSVs plus one figure with every model's layer
+curve on a shared axis.
+
+### Read layer *depth*, not layer *index*
+
+XLM-R base has 13 layers, Llama-3.2-1B has 17, Gemma-3-1B has 27, Qwen3-0.6B
+has 29. "Layer 8 is best" means something completely different in each, so
+the comparison reports **`best_depth_fraction`** — the layer as a fraction of
+the model's depth — and plots curves against relative depth. Raw indices are
+kept in the tables but should not be compared across models.
+
+For the same reason the model configs leave `named_windows` and
+`concat_groups` empty, which makes the bottom/middle/top thirds
+depth-relative. Hard-coded indices written for a 13-layer model are now
+rejected at build time rather than failing deep inside the probe loop.
+
+### The confound to check before believing any cross-model result
+
+Tokenizer **fertility**. XLM-R's SentencePiece vocabulary was built with
+Amharic and Hausa in it; an English-centric BPE can spend several times as
+many tokens on the same Ge'ez text. At a fixed `max_length` the two models
+therefore see *different amounts of each sentence*, and your layer comparison
+quietly becomes a comparison of how much got truncated.
+
+Every run writes `fertility` into `results.json` (tokens per character, mean
+and p95 token count, and the fraction of examples truncated), and
+`compare_models.py` prints a warning naming any model/language pair that
+truncates more than 5%. If you see that warning, raise `max_length` for that
+model before drawing conclusions — or accept that you are comparing
+truncation, not representations.
+
+### Other decoder-only caveats
+
+- **Gating.** Llama and Gemma require accepting a licence on the Hub and
+  being logged in (`huggingface-cli login`); loading fails with a 401
+  otherwise. Qwen is ungated, which makes it the easiest starting point.
+- **Base, not instruct.** The configs point at base checkpoints
+  (`Qwen3-0.6B-Base`, `Llama-3.2-1B`, `gemma-3-1b-pt`). Instruction-tuned
+  variants have been through post-training that reshapes their
+  representations; mixing the two families in one comparison confounds
+  architecture with alignment.
+- **Cost.** 29 layers at 1024 dimensions is several times XLM-R's cache
+  footprint and extraction time. Lower `batch_size`, and restrict
+  `encoder.layers` if disk is tight.
+- **Multilinguality is not comparable.** These decoders were not trained
+  with the balanced multilingual objective XLM-R was. A finding that one
+  transfers worse to Amharic may be about pretraining data, not about depth.
+
 ## 5. Limitations
 
 - **Frozen features only.** A layer that probes badly may still fine-tune
@@ -280,9 +352,12 @@ Start with `SUMMARY.md`, then:
   `--pooling cls` is the cheap check.
 - **Correlation over 13 points.** The diagnostics-versus-transfer
   correlations are suggestive at best.
-- **One encoder at a time.** Findings for `xlm-roberta-base` need not hold
-  for `-large` (24 layers, different depth profile), mBERT, or LaBSE. The
-  config makes re-running cheap; do it before generalising.
+- **Cross-model claims are the weakest ones here.** Two encoders differ in
+  depth, tokenizer, pretraining mixture, objective and attention direction
+  all at once. When Qwen and XLM-R disagree about where the best layer sits,
+  the study cannot tell you which of those five things caused it. Treat the
+  comparison as descriptive, and check the fertility table before treating
+  it as anything more.
 - **Corpus artefacts.** BRIGHTER's per-language datasets differ in domain,
   annotation guidelines and size. A per-language difference in best layer may
   be a difference in corpus, not in language. `max_train_per_language`
@@ -290,8 +365,11 @@ Start with `SUMMARY.md`, then:
 
 ## 6. Extending it
 
-- **Another encoder**: `--model` anything with `output_hidden_states`.
-  `HFEncoder` reads its depth off the model config.
+- **Another encoder**: `--model` anything with `output_hidden_states` --
+  masked (XLM-R, mBERT, LaBSE) or decoder-only (Qwen, Llama, Gemma,
+  Mistral). `HFEncoder` reads depth off the model config, fills in a missing
+  pad token, and rejects `cls` pooling on a causal model. Copy a file in
+  `configs/models/` and change only its encoder block.
 - **Another dataset**: add a loader to `layerprobe/data.py` returning
   `EmotionSplit` objects; everything downstream is agnostic.
 - **Another combination**: add a `kind` to `layerprobe/combinations.py` and a
@@ -299,4 +377,7 @@ Start with `SUMMARY.md`, then:
 - **Another diagnostic**: add it to `layerprobe/analysis.py` and reference it
   from `pipeline.run_experiment`.
 
-Tests: `python -m pytest tests/ -q` (81 tests, ~75 s, no network).
+Tests: `python -m pytest tests/ -q` (123 tests, ~60 s, no network). The
+decoder support is covered against randomly initialised Qwen3, Llama and
+Gemma3 models built from their configs, so the real transformers code path
+is exercised without downloading weights.

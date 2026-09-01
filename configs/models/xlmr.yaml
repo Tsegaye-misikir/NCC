@@ -1,0 +1,14 @@
+# XLM-R base: the reference point the other models are compared against.
+# A masked encoder, bidirectional, with a SentencePiece vocabulary that was
+# built with the low-resource target languages in it.
+extends: _base.yaml
+
+name: xlmr-base
+output_dir: results/models/xlmr-base
+
+encoder:
+  model_name: xlm-roberta-base
+  pooling: mean          # mask-aware mean; cls is available but untrained here
+  max_length: 128
+  batch_size: 64
+  half_precision: true   # bf16 on GPU, ignored on CPU

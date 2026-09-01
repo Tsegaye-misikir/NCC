@@ -88,20 +88,42 @@ def build_combinations(cfg: CombinationConfig, layer_ids: Sequence[int]) -> List
     named = dict(cfg.named_windows)
     if not named:
         # Sensible defaults expressed relative to the encoder's depth, so the
-        # same config works for a 12-layer base and a 24-layer large model.
+        # same config works for a 12-layer XLM-R base, a 24-layer large, and
+        # a 28-layer Qwen without editing anything.
         n = len(layer_ids)
         named = {
             "avg_bottom": layer_ids[: max(1, n // 3)],
             "avg_middle": layer_ids[max(1, n // 3) : max(2, 2 * n // 3)],
             "avg_top": layer_ids[max(2, 2 * n // 3) :],
         }
-    for name, layers in named.items():
+    available = set(layer_ids)
+
+    def _validated(name: str, layers: Sequence[int], source: str) -> List[int]:
+        """Reject layer indices this encoder does not have.
+
+        Hard-coded windows are the main trap when swapping models: a group
+        written for a 13-layer XLM-R silently refers to nothing on a
+        28-layer Qwen, so fail loudly at build time rather than deep inside
+        the probe loop.
+        """
+
         layers = [int(l) for l in layers]
+        missing = sorted(set(layers) - available)
+        if missing:
+            raise ValueError(
+                f"{source} {name!r} refers to layer(s) {missing}, but this encoder "
+                f"only has {min(available)}..{max(available)}. Leave "
+                "combinations.named_windows empty to get depth-relative thirds."
+            )
+        return layers
+
+    for name, layers in named.items():
+        layers = _validated(name, layers, "combinations.named_windows")
         if layers:
             add(LayerCombination(name, "average", tuple(layers)))
 
     for name, layers in cfg.concat_groups.items():
-        layers = [int(l) for l in layers]
+        layers = _validated(name, layers, "combinations.concat_groups")
         if layers:
             add(LayerCombination(name, "concat", tuple(layers)))
 

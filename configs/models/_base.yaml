@@ -1,0 +1,61 @@
+# Shared base for the cross-model comparison.
+#
+# Every configs/models/*.yaml extends this file and overrides only its
+# encoder block. Keeping the corpus, the splits, the seeds and the probe
+# fixed in one place is what makes the models comparable at all -- if the
+# data block drifted between them, the differences you measure would be
+# differences in the experiment, not in the model.
+#
+# This file is not meant to be run on its own; run one of the model configs.
+
+name: model-comparison-base
+output_dir: results/models/base
+cache_dir: cache/models
+
+seeds: [13, 42, 1234]
+
+run_monolingual: true
+run_zeroshot: true
+run_multilingual: true
+
+data:
+  source: hf
+  hf_path: brighter-dataset/BRIGHTER-emotion-categories
+  hf_name_template: "{language}"
+  hf_text_column: text
+  languages: [eng, amh, hau, swa]
+  source_languages: [eng]
+  task: multilabel
+  emotions: [anger, disgust, fear, joy, sadness, surprise]
+  max_train_per_language: 2000
+  max_eval_per_language: 1000
+
+probe:
+  kind: logreg
+  C: [0.01, 0.1, 1.0, 10.0]
+  max_iter: 3000
+  standardize: true
+  train_subsample: 0.9
+
+scalar_mix:
+  enabled: true
+  epochs: 80
+  learning_rate: 0.005
+  batch_size: 64
+  layer_norm: true
+
+combinations:
+  individual_layers: true
+  average_all: true
+  window_sizes: [4]
+  # Deliberately empty: depth-relative thirds are computed from whatever
+  # encoder is loaded. Hard-coded indices written for a 13-layer XLM-R would
+  # be wrong for a 29-layer Qwen, and the loader now rejects them outright.
+  named_windows: {}
+  concat_groups: {}
+  scalar_mix: true
+
+analysis:
+  language_probe: true
+  cka: true
+  cka_max_samples: 500

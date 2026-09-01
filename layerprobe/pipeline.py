@@ -39,15 +39,29 @@ def run_experiment(
     store, encoder = extract_corpus(corpus, cfg.encoder, cfg.cache_dir, verbose=verbose)
     layer_ids = cfg.encoder.layers if cfg.encoder.layers is not None else encoder.layer_ids
 
+    languages = list(corpus)
+
     if verbose:
         print("[3/5] probing layers and combinations", flush=True)
     payload: Dict[str, object] = dict(run_all(cfg, corpus, store, layer_ids, verbose=verbose))
     payload["config"] = cfg.to_dict()
     payload["data_summary"] = describe(corpus)
+    payload["encoder_summary"] = {
+        "model_name": cfg.encoder.model_name,
+        "pooling": cfg.encoder.pooling,
+        "hidden_size": encoder.hidden_size,
+        "num_layers": encoder.num_layers,
+        "layer_ids": list(layer_ids),
+        "causal": bool(getattr(encoder, "is_causal", False)),
+    }
+    if cfg.encoder.report_fertility and hasattr(encoder, "fertility"):
+        payload["fertility"] = [
+            dict(language=language, **encoder.fertility(corpus[language]["train"].texts))
+            for language in languages
+        ]
 
     if verbose:
         print("[4/5] running representation diagnostics", flush=True)
-    languages = list(corpus)
     if cfg.analysis.language_probe:
         payload["language_probe"] = language_identification(
             store, languages, layer_ids, seed=base_seed
