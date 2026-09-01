@@ -203,14 +203,40 @@ python run_experiments.py --config configs/brighter.yaml \
 
 Features are extracted once per (language, split) and cached in `cache_dir`,
 keyed by a fingerprint of the encoder settings *and* the texts, so a stale
-cache cannot silently poison a run. After the first pass, re-running the
-probes is CPU-only and takes minutes. Extraction of ~20k sentences with
-`xlm-roberta-base` is a few minutes on a single GPU and roughly an hour on
-CPU.
+cache cannot silently poison a run. Extraction of ~20k sentences with
+`xlm-roberta-base` is a few minutes on a single GPU and roughly half an hour
+on CPU.
+
+After that the probes dominate, and they are CPU-bound regardless of GPU.
+Measured on a 4-core machine (one 6-way one-vs-rest fit at n=2000, d=768
+takes ~2 s), `configs/brighter.yaml` costs roughly **2.3 hours** of probe
+fitting. Two things keep that manageable:
+
+- The cross-lingual runners fit each (combination, seed) **once** and score
+  it against every target language, rather than refitting per target. The
+  fit depends only on train and dev, so this is exact — but it is worth
+  ~4× on the full config (9.7 h → 2.3 h), almost all of it in the
+  multilingual setting.
+- `configs/brighter_cpu.yaml` is a ~10-minute first pass (4 languages, 800
+  training examples, 2 seeds, one `C`, named windows only) that shares the
+  feature cache with the full run.
+
+The knobs that matter most, in order: number of `seeds`, length of
+`probe.C`, `combinations.window_sizes` (each size adds ~10 combinations),
+and `max_train_per_language`.
 
 Cache size is the thing to watch: all 13 layers of 20k sentences at 768
 dimensions is about 800 MB compressed. Restrict `encoder.layers` if that is a
 problem.
+
+### Reproducibility
+
+A run is reproducible across processes and machines: same config, same
+numbers. Anything seeded is seeded from `layerprobe.data.stable_seed`, never
+from Python's `hash()`, which is salted per process — seeding synthetic data
+from `hash("amh")` silently produced a different corpus on every run, which
+also defeated the feature cache. `tests/test_data.py` guards this in a
+separate interpreter, since a same-process check cannot see the salt change.
 
 ## 4. Output
 

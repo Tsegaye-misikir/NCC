@@ -1,0 +1,74 @@
+# A lean first pass of the BRIGHTER study, sized for a CPU-only machine.
+#
+# Same design as configs/brighter.yaml, trimmed so that a full run finishes
+# in roughly ten minutes rather than a couple of hours: four languages, a
+# smaller training cap, two seeds, a fixed regularisation strength, and
+# named layer windows instead of every sliding window.
+#
+# Use this to shake out the dataset wiring and see the shape of the layer
+# curve. Move to configs/brighter.yaml (and a GPU) before drawing any
+# conclusion: two seeds and one C value are not enough to separate a real
+# layer effect from noise, and layerprobe.metrics.paired_bootstrap will tell
+# you so.
+
+name: brighter-xlmr-cpu
+output_dir: results/brighter-xlmr-cpu
+cache_dir: cache/brighter-xlmr        # shared with the full run: same texts,
+                                      # same encoder settings, so features
+                                      # extracted here are reused there
+seeds: [13, 42]
+
+run_monolingual: true
+run_zeroshot: true
+run_multilingual: true
+
+data:
+  source: hf
+  hf_path: brighter-dataset/BRIGHTER-emotion-categories
+  hf_name_template: "{language}"
+  hf_text_column: text
+  languages: [eng, amh, hau, swa]
+  source_languages: [eng]
+  task: multilabel
+  emotions: [anger, disgust, fear, joy, sadness, surprise]
+  max_train_per_language: 800
+  max_eval_per_language: 500
+
+encoder:
+  model_name: xlm-roberta-base
+  pooling: mean
+  max_length: 128
+  batch_size: 32          # modest, to keep CPU memory flat
+  device: null
+  half_precision: false   # fp16 is a GPU optimisation; it is slower on CPU
+  layers: null
+  normalize: false
+
+probe:
+  kind: logreg
+  C: [1.0]                # no sweep on the first pass
+  max_iter: 1000
+  standardize: true
+  train_subsample: 0.9
+
+scalar_mix:
+  enabled: true
+  epochs: 40
+  learning_rate: 0.005
+  batch_size: 64
+  layer_norm: true
+
+combinations:
+  individual_layers: true
+  average_all: true
+  window_sizes: []        # named windows only -- sliding windows add ~10 combos
+  named_windows:
+    avg_bottom: [0, 1, 2, 3]
+    avg_middle: [4, 5, 6, 7, 8]
+    avg_top: [9, 10, 11, 12]
+  scalar_mix: true
+
+analysis:
+  language_probe: true
+  cka: true
+  cka_max_samples: 400

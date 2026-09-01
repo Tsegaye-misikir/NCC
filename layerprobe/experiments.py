@@ -64,31 +64,30 @@ def _resample_train(
     return features.subset(idx), labels[idx]
 
 
-def _run_one(
+def _design(features: LayerFeatures, combo: LayerCombination) -> np.ndarray:
+    """The array a probe consumes for this combination."""
+
+    if combo.kind == "scalarmix":
+        return layer_tensor(features, combo)
+    return materialize(features, combo)
+
+
+def _fit_one(
     cfg: ExperimentConfig,
     combo: LayerCombination,
     train: tuple[LayerFeatures, np.ndarray],
     dev: tuple[LayerFeatures, np.ndarray],
-    test: tuple[LayerFeatures, np.ndarray],
     emotions: Sequence[str],
     task: str,
     seed: int,
 ):
-    """Fit and score one probe for one combination, at one seed."""
+    """Fit one probe for one combination, at one seed."""
 
     if combo.kind == "scalarmix":
         probe = ScalarMixProbe(cfg.probe, cfg.scalar_mix, task, emotions, seed)
-        return probe.run(
-            layer_tensor(train[0], combo), train[1],
-            layer_tensor(dev[0], combo), dev[1],
-            layer_tensor(test[0], combo), test[1],
-        )
-    probe = build_probe(cfg.probe, task, emotions, seed)
-    return probe.run(
-        materialize(train[0], combo), train[1],
-        materialize(dev[0], combo), dev[1],
-        materialize(test[0], combo), test[1],
-    )
+    else:
+        probe = build_probe(cfg.probe, task, emotions, seed)
+    return probe.fit(_design(train[0], combo), train[1], _design(dev[0], combo), dev[1])
 
 
 def _aggregate(
@@ -121,6 +120,50 @@ def _aggregate(
     return rows
 
 
+def _probe_sweep_multi(
+    cfg: ExperimentConfig,
+    combos: Sequence[LayerCombination],
+    train: tuple[LayerFeatures, np.ndarray],
+    dev: tuple[LayerFeatures, np.ndarray],
+    tests: Dict[str, tuple[LayerFeatures, np.ndarray]],
+    emotions: Sequence[str],
+    task: str,
+    contexts: Dict[str, Dict[str, object]],
+    verbose: bool = True,
+) -> List[dict]:
+    """Fit each (combination, seed) once, then score it on every test set.
+
+    The cross-lingual experiments train a single probe and evaluate it on
+    many target languages.  Fitting is by far the dominant cost, so it is
+    hoisted out of the loop over targets; the results are identical to
+    refitting per target, because the fit depends only on train and dev.
+    """
+
+    per_seed: Dict[str, Dict[str, List[dict]]] = {
+        language: {c.name: [] for c in combos} for language in tests
+    }
+    for seed in cfg.seeds:
+        seed_train = _resample_train(train, cfg.probe.train_subsample, seed)
+        for combo in combos:
+            probe = _fit_one(cfg, combo, seed_train, dev, emotions, task, seed)
+            for language, test in tests.items():
+                outcome = probe.outcome(_design(test[0], combo), test[1])
+                per_seed[language][combo.name].append(
+                    {"dev": outcome.dev, "test": outcome.test, "layer_weights": outcome.layer_weights}
+                )
+
+    rows: List[dict] = []
+    for language, by_combo in per_seed.items():
+        if verbose:
+            best = max(
+                by_combo.items(), key=lambda kv: np.mean([o["test"]["macro_f1"] for o in kv[1]])
+            )
+            best_score = float(np.mean([o["test"]["macro_f1"] for o in best[1]]))
+            print(f"    {language}: best {best[0]} (macro-F1 {best_score:.4f})", flush=True)
+        rows.extend(_aggregate(by_combo, combos, contexts[language]))
+    return rows
+
+
 def _probe_sweep(
     cfg: ExperimentConfig,
     combos: Sequence[LayerCombination],
@@ -134,19 +177,10 @@ def _probe_sweep(
 ) -> List[dict]:
     """Run every combination over every seed for one train/test setting."""
 
-    per_seed: Dict[str, List[dict]] = {c.name: [] for c in combos}
-    for seed in cfg.seeds:
-        seed_train = _resample_train(train, cfg.probe.train_subsample, seed)
-        for combo in combos:
-            outcome = _run_one(cfg, combo, seed_train, dev, test, emotions, task, seed)
-            per_seed[combo.name].append(
-                {"dev": outcome.dev, "test": outcome.test, "layer_weights": outcome.layer_weights}
-            )
-    if verbose:
-        best = max(per_seed.items(), key=lambda kv: np.mean([o["test"]["macro_f1"] for o in kv[1]]))
-        best_score = float(np.mean([o["test"]["macro_f1"] for o in best[1]]))
-        print(f"    best: {best[0]} (macro-F1 {best_score:.4f})", flush=True)
-    return _aggregate(per_seed, combos, context)
+    language = str(context.get("eval_language", "test"))
+    return _probe_sweep_multi(
+        cfg, combos, train, dev, {language: test}, emotions, task, {language: context}, verbose
+    )
 
 
 def run_monolingual(
@@ -221,33 +255,24 @@ def run_zeroshot(
     dev = _pooled_setting(corpus, store, sources, "dev")
     reference = corpus[sources[0]]["train"]
 
-    rows: List[dict] = []
+    if verbose:
+        print(f"  [zero-shot] {'+'.join(sources)} -> {', '.join(targets)}", flush=True)
+    tests, contexts = {}, {}
     for target in targets:
-        if verbose:
-            print(f"  [zero-shot] {'+'.join(sources)} -> {target}", flush=True)
         test_split = corpus[target]["test"]
-        rows.extend(
-            _probe_sweep(
-                cfg,
-                combos,
-                train,
-                dev,
-                (store[target]["test"], test_split.labels),
-                reference.emotions,
-                reference.task,
-                {
-                    "experiment": "zeroshot",
-                    "train_languages": list(sources),
-                    "eval_language": target,
-                    "n_train": train[1].shape[0],
-                    "majority_macro_f1": majority_baseline(
-                        train[1], test_split.labels, reference.task, reference.emotions
-                    )["macro_f1"],
-                },
-                verbose,
-            )
-        )
-    return rows
+        tests[target] = (store[target]["test"], test_split.labels)
+        contexts[target] = {
+            "experiment": "zeroshot",
+            "train_languages": list(sources),
+            "eval_language": target,
+            "n_train": train[1].shape[0],
+            "majority_macro_f1": majority_baseline(
+                train[1], test_split.labels, reference.task, reference.emotions
+            )["macro_f1"],
+        }
+    return _probe_sweep_multi(
+        cfg, combos, train, dev, tests, reference.emotions, reference.task, contexts, verbose
+    )
 
 
 def run_multilingual(
@@ -267,33 +292,24 @@ def run_multilingual(
     dev = _pooled_setting(corpus, store, languages, "dev")
     reference = corpus[languages[0]]["train"]
 
-    rows: List[dict] = []
+    if verbose:
+        print(f"  [multilingual] eval on {', '.join(languages)}", flush=True)
+    tests, contexts = {}, {}
     for language in languages:
-        if verbose:
-            print(f"  [multilingual] eval on {language}", flush=True)
         test_split = corpus[language]["test"]
-        rows.extend(
-            _probe_sweep(
-                cfg,
-                combos,
-                train,
-                dev,
-                (store[language]["test"], test_split.labels),
-                reference.emotions,
-                reference.task,
-                {
-                    "experiment": "multilingual",
-                    "train_languages": list(languages),
-                    "eval_language": language,
-                    "n_train": train[1].shape[0],
-                    "majority_macro_f1": majority_baseline(
-                        train[1], test_split.labels, reference.task, reference.emotions
-                    )["macro_f1"],
-                },
-                verbose,
-            )
-        )
-    return rows
+        tests[language] = (store[language]["test"], test_split.labels)
+        contexts[language] = {
+            "experiment": "multilingual",
+            "train_languages": list(languages),
+            "eval_language": language,
+            "n_train": train[1].shape[0],
+            "majority_macro_f1": majority_baseline(
+                train[1], test_split.labels, reference.task, reference.emotions
+            )["macro_f1"],
+        }
+    return _probe_sweep_multi(
+        cfg, combos, train, dev, tests, reference.emotions, reference.task, contexts, verbose
+    )
 
 
 def add_transfer_columns(rows: Sequence[dict]) -> List[dict]:

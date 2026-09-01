@@ -3,6 +3,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -40,6 +45,31 @@ def test_loading_is_deterministic_for_a_seed():
     second = load_corpus(cfg, seed=7)["eng"]["train"]
     assert first.texts == second.texts
     np.testing.assert_array_equal(first.labels, second.labels)
+
+
+def test_stable_seed_survives_hash_randomisation():
+    """Python salts hash() per process; seeds must not depend on it.
+
+    Seeding from ``hash("amh")`` silently produced a different corpus on
+    every run, which broke both reproducibility and the feature cache. This
+    checks the property in a *separate interpreter*, since a same-process
+    check cannot see the salt change.
+    """
+
+    script = (
+        "from layerprobe.data import stable_seed, load_corpus;"
+        "from layerprobe.config import DataConfig;"
+        "c=DataConfig(source='synthetic', languages=['amh'], synthetic_size=20);"
+        "print(stable_seed('amh', 7), load_corpus(c, seed=3)['amh']['train'].texts[0])"
+    )
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent.parent))
+    runs = {
+        subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, env=env, check=True
+        ).stdout
+        for _ in range(3)
+    }
+    assert len(runs) == 1, f"synthetic data differs between processes: {runs}"
 
 
 def test_emotion_markers_are_shared_across_languages():

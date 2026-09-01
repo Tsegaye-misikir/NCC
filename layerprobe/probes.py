@@ -101,17 +101,16 @@ class LogisticProbe:
         self.task = task
         self.emotions = list(emotions)
 
-    def run(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_dev: np.ndarray,
-        y_dev: np.ndarray,
-        X_test: np.ndarray,
-        y_test: np.ndarray,
-    ) -> ProbeOutcome:
-        scaler = _Standardizer(self.cfg.standardize).fit(X_train)
-        Xtr, Xdev, Xte = (scaler.transform(X) for X in (X_train, X_dev, X_test))
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray, X_dev: np.ndarray, y_dev: np.ndarray):
+        """Fit the probe and pick ``C`` and the threshold on dev.
+
+        Kept separate from scoring because the cross-lingual experiments
+        train one probe and evaluate it on many target languages; refitting
+        per target would repeat the dominant cost for nothing.
+        """
+
+        self._scaler = _Standardizer(self.cfg.standardize).fit(X_train)
+        Xtr, Xdev = self._scaler.transform(X_train), self._scaler.transform(X_dev)
 
         best = None
         for C in self.cfg.C:
@@ -124,28 +123,46 @@ class LogisticProbe:
                     if self.cfg.threshold is not None
                     else tune_threshold(y_dev, dev_prob)
                 )
-                dev_scores = score(y_dev, dev_prob, self.task, threshold, self.emotions)
-                state = (models, constants, threshold)
+                state = (models, constants)
             else:
                 clf = LogisticRegression(C=C, max_iter=self.cfg.max_iter, class_weight="balanced")
                 clf.fit(Xtr, y_train)
                 dev_prob = self._dense_proba(clf, Xdev)
                 threshold = 0.5
-                dev_scores = score(y_dev, dev_prob, self.task, threshold, self.emotions)
-                state = (clf, None, threshold)
+                state = (clf, None)
+            dev_scores = score(y_dev, dev_prob, self.task, threshold, self.emotions)
             if best is None or dev_scores["macro_f1"] > best[0]["macro_f1"]:
-                best = (dev_scores, state, C)
+                best = (dev_scores, state, C, threshold)
 
         assert best is not None
-        dev_scores, state, C = best
+        self.dev_scores, self._state, C, self.threshold = best
+        self.chosen = {"C": float(C), "threshold": float(self.threshold)}
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        Xs = self._scaler.transform(X)
         if self.task == "multilabel":
-            models, constants, threshold = state
-            test_prob = _predict_logreg_multilabel(models, Xte, constants)
-        else:
-            clf, _, threshold = state
-            test_prob = self._dense_proba(clf, Xte)
-        test_scores = score(y_test, test_prob, self.task, threshold, self.emotions)
-        return ProbeOutcome(dev_scores, test_scores, None, {"C": float(C), "threshold": float(threshold)})
+            models, constants = self._state
+            return _predict_logreg_multilabel(models, Xs, constants)
+        clf, _ = self._state
+        return self._dense_proba(clf, Xs)
+
+    def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, float]:
+        return score(y_test, self.predict_proba(X_test), self.task, self.threshold, self.emotions)
+
+    def outcome(self, X_test: np.ndarray, y_test: np.ndarray) -> ProbeOutcome:
+        return ProbeOutcome(self.dev_scores, self.evaluate(X_test, y_test), None, dict(self.chosen))
+
+    def run(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_dev: np.ndarray,
+        y_dev: np.ndarray,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+    ) -> ProbeOutcome:
+        return self.fit(X_train, y_train, X_dev, y_dev).outcome(X_test, y_test)
 
     def _dense_proba(self, clf: LogisticRegression, X: np.ndarray) -> np.ndarray:
         """``predict_proba`` widened to the full emotion inventory.
@@ -234,40 +251,53 @@ class MLPProbe:
         self.emotions = list(emotions)
         self.seed = seed
 
-    def run(self, X_train, y_train, X_dev, y_dev, X_test, y_test) -> ProbeOutcome:
-        trainer = _TorchTrainer(self.task, self.emotions, self.seed)
-        torch = trainer.torch
+    def fit(self, X_train, y_train, X_dev, y_dev):
+        self._trainer = _TorchTrainer(self.task, self.emotions, self.seed)
+        torch = self._trainer.torch
 
-        scaler = _Standardizer(self.cfg.standardize).fit(X_train)
-        Xtr, Xdev, Xte = (
-            torch.as_tensor(scaler.transform(X), dtype=torch.float32) for X in (X_train, X_dev, X_test)
+        self._scaler = _Standardizer(self.cfg.standardize).fit(X_train)
+        Xtr, Xdev = (
+            torch.as_tensor(self._scaler.transform(X), dtype=torch.float32) for X in (X_train, X_dev)
         )
-        n_out = len(self.emotions)
-        module = torch.nn.Sequential(
+        self._module = torch.nn.Sequential(
             torch.nn.Linear(Xtr.shape[1], self.cfg.hidden_size),
             torch.nn.Tanh(),
             torch.nn.Dropout(0.1),
-            torch.nn.Linear(self.cfg.hidden_size, n_out),
+            torch.nn.Linear(self.cfg.hidden_size, len(self.emotions)),
         )
-        trainer.train(
-            module,
+        self._trainer.train(
+            self._module,
             Xtr,
-            trainer.to_targets(y_train),
+            self._trainer.to_targets(y_train),
             self.cfg.epochs,
             self.cfg.learning_rate,
             self.cfg.weight_decay,
             batch_size=64,
         )
-        dev_prob = trainer.predict(module, Xdev)
+        dev_prob = self._trainer.predict(self._module, Xdev)
         if self.task != "multilabel":
-            threshold = 0.5
+            self.threshold = 0.5
         elif self.cfg.threshold is not None:
-            threshold = float(self.cfg.threshold)
+            self.threshold = float(self.cfg.threshold)
         else:
-            threshold = tune_threshold(y_dev, dev_prob)
-        dev_scores = score(y_dev, dev_prob, self.task, threshold, self.emotions)
-        test_scores = score(y_test, trainer.predict(module, Xte), self.task, threshold, self.emotions)
-        return ProbeOutcome(dev_scores, test_scores, None, {"threshold": threshold})
+            self.threshold = tune_threshold(y_dev, dev_prob)
+        self.dev_scores = score(y_dev, dev_prob, self.task, self.threshold, self.emotions)
+        self.chosen = {"threshold": float(self.threshold)}
+        return self
+
+    def predict_proba(self, X) -> np.ndarray:
+        torch = self._trainer.torch
+        tensor = torch.as_tensor(self._scaler.transform(X), dtype=torch.float32)
+        return self._trainer.predict(self._module, tensor)
+
+    def evaluate(self, X_test, y_test) -> Dict[str, float]:
+        return score(y_test, self.predict_proba(X_test), self.task, self.threshold, self.emotions)
+
+    def outcome(self, X_test, y_test) -> ProbeOutcome:
+        return ProbeOutcome(self.dev_scores, self.evaluate(X_test, y_test), None, dict(self.chosen))
+
+    def run(self, X_train, y_train, X_dev, y_dev, X_test, y_test) -> ProbeOutcome:
+        return self.fit(X_train, y_train, X_dev, y_dev).outcome(X_test, y_test)
 
 
 def _build_scalar_mix(torch, n_layers: int, hidden_size: int, n_out: int, cfg: ScalarMixConfig):
@@ -320,41 +350,61 @@ class ScalarMixProbe:
         self.emotions = list(emotions)
         self.seed = seed
 
-    def run(self, T_train, y_train, T_dev, y_dev, T_test, y_test) -> ProbeOutcome:
+    def fit(self, T_train, y_train, T_dev, y_dev):
         """Inputs are ``(n_layers, n, d)`` tensors, not flat matrices."""
 
-        trainer = _TorchTrainer(self.task, self.emotions, self.seed)
-        torch = trainer.torch
+        self._trainer = _TorchTrainer(self.task, self.emotions, self.seed)
+        torch = self._trainer.torch
 
         # Standardise per layer using train statistics, so that a layer with a
         # large activation norm cannot win the mixture on scale alone.
-        mean = T_train.mean(axis=1, keepdims=True)
-        std = T_train.std(axis=1, keepdims=True) + 1e-6
-        tensors = [
-            torch.as_tensor((T - mean) / std, dtype=torch.float32) for T in (T_train, T_dev, T_test)
-        ]
-        Ttr, Tdev, Tte = tensors
+        self._mean = T_train.mean(axis=1, keepdims=True)
+        self._std = T_train.std(axis=1, keepdims=True) + 1e-6
+        Ttr, Tdev = (self._standardise(T) for T in (T_train, T_dev))
 
-        mix = _build_scalar_mix(torch, Ttr.shape[0], Ttr.shape[2], len(self.emotions), self.mix_cfg)
-        trainer.train(
-            mix,
+        self._mix = _build_scalar_mix(
+            torch, Ttr.shape[0], Ttr.shape[2], len(self.emotions), self.mix_cfg
+        )
+        self._trainer.train(
+            self._mix,
             Ttr,
-            trainer.to_targets(y_train),
+            self._trainer.to_targets(y_train),
             self.mix_cfg.epochs,
             self.mix_cfg.learning_rate,
             self.mix_cfg.weight_decay,
             self.mix_cfg.batch_size,
         )
-        dev_prob = trainer.predict(mix, Tdev)
+        dev_prob = self._trainer.predict(self._mix, Tdev)
         if self.task == "multilabel":
-            threshold = (
-                float(self.cfg.threshold) if self.cfg.threshold is not None else tune_threshold(y_dev, dev_prob)
+            self.threshold = (
+                float(self.cfg.threshold)
+                if self.cfg.threshold is not None
+                else tune_threshold(y_dev, dev_prob)
             )
         else:
-            threshold = 0.5
-        dev_scores = score(y_dev, dev_prob, self.task, threshold, self.emotions)
-        test_scores = score(y_test, trainer.predict(mix, Tte), self.task, threshold, self.emotions)
-        return ProbeOutcome(dev_scores, test_scores, mix.layer_weights(), {"threshold": threshold})
+            self.threshold = 0.5
+        self.dev_scores = score(y_dev, dev_prob, self.task, self.threshold, self.emotions)
+        self.layer_weights = self._mix.layer_weights()
+        self.chosen = {"threshold": float(self.threshold)}
+        return self
+
+    def _standardise(self, T):
+        torch = self._trainer.torch
+        return torch.as_tensor((T - self._mean) / self._std, dtype=torch.float32)
+
+    def predict_proba(self, T) -> np.ndarray:
+        return self._trainer.predict(self._mix, self._standardise(T))
+
+    def evaluate(self, T_test, y_test) -> Dict[str, float]:
+        return score(y_test, self.predict_proba(T_test), self.task, self.threshold, self.emotions)
+
+    def outcome(self, T_test, y_test) -> ProbeOutcome:
+        return ProbeOutcome(
+            self.dev_scores, self.evaluate(T_test, y_test), list(self.layer_weights), dict(self.chosen)
+        )
+
+    def run(self, T_train, y_train, T_dev, y_dev, T_test, y_test) -> ProbeOutcome:
+        return self.fit(T_train, y_train, T_dev, y_dev).outcome(T_test, y_test)
 
 
 def build_probe(cfg: ProbeConfig, task: str, emotions: Sequence[str], seed: int = 0):

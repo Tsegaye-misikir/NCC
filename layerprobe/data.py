@@ -13,6 +13,7 @@ Whatever the source, the rest of the package sees the same object: an
 from __future__ import annotations
 
 import csv
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -22,6 +23,18 @@ import numpy as np
 from layerprobe.config import DataConfig
 
 SPLITS = ("train", "dev", "test")
+
+
+def stable_seed(*parts: object) -> int:
+    """A seed derived from ``parts`` that is identical across processes.
+
+    Python salts :func:`hash` for strings per process, so seeding a
+    generator from ``hash("amh")`` silently produces different data on every
+    run -- and, downstream, different cache keys and unreproducible results.
+    """
+
+    digest = hashlib.blake2b("|".join(map(str, parts)).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little")
 
 
 @dataclass
@@ -231,10 +244,10 @@ def _load_synthetic_language(cfg: DataConfig, language: str, seed: int) -> Dict[
     be exercised end to end without touching the network.
     """
 
-    rng = np.random.default_rng(abs(hash((language, seed))) % (2**32))
+    rng = np.random.default_rng(stable_seed(language, seed))
     n_emotions = len(cfg.emotions)
     n = cfg.synthetic_size
-    lang_offset = (abs(hash(language)) % 7 + 1) * 1000
+    lang_offset = (stable_seed(language) % 7 + 1) * 1000
 
     texts: List[str] = []
     if cfg.task == "multilabel":

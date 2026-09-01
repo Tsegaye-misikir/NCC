@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from layerprobe.config import DataConfig, EncoderConfig
-from layerprobe.data import load_corpus
+from layerprobe.data import load_corpus, stable_seed
 from layerprobe.encoders import HFEncoder, SyntheticEncoder, _pool, build_encoder
 from layerprobe.features import extract_corpus, extract_split, stack_features
 
@@ -21,7 +21,8 @@ class _StubTokenizer:
 
     def __call__(self, batch, padding=True, truncation=True, max_length=16, return_tensors="pt"):
         sequences = [
-            [1] + [2 + (abs(hash(tok)) % (self.vocab_size - 3)) for tok in text.split()][: max_length - 1]
+            [1]
+            + [2 + (stable_seed(tok) % (self.vocab_size - 3)) for tok in text.split()][: max_length - 1]
             for text in batch
         ]
         width = max(len(s) for s in sequences)
